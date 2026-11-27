@@ -5,7 +5,7 @@ namespace Akki.ImageConverter.Core;
 public sealed class ImageConverter
 {
     public static readonly HashSet<string> InputExtensions = new(StringComparer.OrdinalIgnoreCase)
-    { ".png", ".jpg", ".jpeg", ".webp", ".avif", ".tif", ".tiff", ".bmp", ".ico", ".gif" };
+    { ".png", ".jpg", ".jpeg", ".webp", ".avif", ".heic", ".heif", ".tif", ".tiff", ".bmp", ".ico", ".gif" };
 
     public static IReadOnlyList<OutputKind> SupportedOutputs => Enum.GetValues<OutputKind>()
         .Where(kind => MagickNET.SupportedFormats.Any(f => f.Format == ToMagickFormat(kind) && f.SupportsWriting)).ToArray();
@@ -52,16 +52,30 @@ public sealed class ImageConverter
         if (options.FlipVertical) image.Flip();
         if (options.Crop != CropKind.None)
         {
-            double ratio = options.Crop switch { CropKind.Square => 1, CropKind.Landscape => 16.0 / 9, CropKind.Portrait => 4.0 / 5, _ => 1 };
+            double ratio = options.Crop switch { CropKind.Square => 1, CropKind.Landscape => 16.0 / 9, CropKind.Portrait => 4.0 / 5, CropKind.Custom => (double)options.CropWidth / options.CropHeight, _ => 1 };
             uint width = image.Width, height = image.Height;
             if ((double)width / height > ratio) width = Math.Max(1u, (uint)Math.Round(height * ratio));
             else height = Math.Max(1u, (uint)Math.Round(width / ratio));
-            image.Crop(new MagickGeometry(width, height), Gravity.Center);
+            var anchor = options.CropAnchor switch
+            {
+                CropAnchor.Top => Gravity.North, CropAnchor.Bottom => Gravity.South,
+                CropAnchor.Left => Gravity.West, CropAnchor.Right => Gravity.East,
+                CropAnchor.TopLeft => Gravity.Northwest, CropAnchor.TopRight => Gravity.Northeast,
+                CropAnchor.BottomLeft => Gravity.Southwest, CropAnchor.BottomRight => Gravity.Southeast,
+                _ => Gravity.Center
+            };
+            image.Crop(new MagickGeometry(width, height), anchor);
             image.ResetPage();
         }
         var size = CalculateSize(image.Width, image.Height, options);
         if (size != (image.Width, image.Height))
             image.Resize(new MagickGeometry(size.Width, size.Height) { IgnoreAspectRatio = true });
+        if (options.PadToDimensions)
+        {
+            image.Alpha(AlphaAction.On);
+            image.Extent(options.Width, options.Height, Gravity.Center, MagickColors.Transparent);
+            image.ResetPage();
+        }
         if (options.WatermarkText.Length > 0 || options.WatermarkImage.Length > 0)
         {
             var gravity = options.WatermarkPosition switch { WatermarkPosition.BottomLeft => Gravity.Southwest, WatermarkPosition.TopRight => Gravity.Northeast, WatermarkPosition.TopLeft => Gravity.Northwest, WatermarkPosition.Center => Gravity.Center, _ => Gravity.Southeast };
@@ -93,10 +107,19 @@ public sealed class ImageConverter
         }
         if (options.StripMetadata)
         {
-            // Convert profiled images before removing profiles to retain their appearance.
-            if (image.GetColorProfile() is not null) image.TransformColorSpace(ColorProfiles.SRGB);
-            else image.ColorSpace = ColorSpace.sRGB;
-            image.Strip();
+            var profile = image.GetColorProfile();
+            if (options.PreserveColorProfile && profile is not null)
+            {
+                image.Strip();
+                image.SetProfile(profile);
+            }
+            else
+            {
+                // Convert profiled images before removing profiles to retain their appearance.
+                if (profile is not null) image.TransformColorSpace(ColorProfiles.SRGB);
+                else image.ColorSpace = ColorSpace.sRGB;
+                image.Strip();
+            }
         }
         image.Quality = options.Quality;
         if (options.Format == OutputKind.WebP)
@@ -188,6 +211,8 @@ public sealed class ImageConverter
         options.Validate();
         using var image = LoadStill(path);
         using var original = image.Clone();
+        // These PNGs are transient UI buffers, so favour speed over file size.
+        original.Settings.SetDefine(MagickFormat.Png, "compression-level", "1");
         var before = original.ToByteArray(MagickFormat.Png);
         Prepare(image, options);
         if (options.Format == OutputKind.Ico) image.Resize(256, 256);
@@ -195,6 +220,17 @@ public sealed class ImageConverter
         using var decoded = new MagickImage(encoded);
         var width = decoded.Width;
         var height = decoded.Height;
+        decoded.Settings.SetDefine(MagickFormat.Png, "compression-level", "1");
         return (before, decoded.ToByteArray(MagickFormat.Png), encoded.LongLength, width, height);
+    }
+
+    public byte[] PreviewOriginal(string path, uint maxDimension = 1600)
+    {
+        if (maxDimension == 0) throw new ArgumentOutOfRangeException(nameof(maxDimension));
+        using var image = LoadStill(path);
+        if (image.Width > maxDimension || image.Height > maxDimension)
+            image.Resize(new MagickGeometry(maxDimension, maxDimension));
+        image.Settings.SetDefine(MagickFormat.Png, "compression-level", "1");
+        return image.ToByteArray(MagickFormat.Png);
     }
 }

@@ -27,6 +27,17 @@ try
     legacyPreferences.Presets.Add("Web", new ConversionOptions { Format = OutputKind.Jpeg, Crop = CropKind.Square, NumberFiles = true });
     var presetRoundTrip = System.Text.Json.JsonSerializer.Deserialize<Preferences>(System.Text.Json.JsonSerializer.Serialize(legacyPreferences))!;
     Check(presetRoundTrip.Presets["Web"] is { Format: OutputKind.Jpeg, Crop: CropKind.Square, NumberFiles: true }, "Preset settings survive serialization");
+    foreach (var name in BuiltInPresets.Names)
+    {
+        var preset = BuiltInPresets.Apply(name, @"C:\example", false, false);
+        preset.Validate();
+        Check(preset.OutputDirectory == @"C:\example" && !preset.OutputToSourceFolder && !preset.KeepFolderStructure &&
+            preset.KeepAspectRatio && preset.PreventUpscale && preset.StripMetadata && preset.Crop == CropKind.None && preset.WatermarkText == "",
+            $"Built-in preset {name} preserves destination and uses safe defaults");
+    }
+    Check(BuiltInPresets.Apply(BuiltInPresets.Names[0], "", true, true) is { Format: OutputKind.WebP, Width: 1920, Height: 1920, OutputToSourceFolder: true }, "Web preset respects source-folder destination");
+    Check(BuiltInPresets.Apply(BuiltInPresets.Names[1], "", true, true) is { Format: OutputKind.Jpeg, Width: 1600, Height: 1600, Background: "#FFFFFF" }, "Email preset uses JPEG with a white background");
+    Check(BuiltInPresets.Apply(BuiltInPresets.Names[2], "", true, true) is { Format: OutputKind.Png, Resize: ResizeKind.Original }, "PNG preset retains original dimensions");
     var input = Path.Combine(root, "input");
     var output = Path.Combine(root, "output");
     Directory.CreateDirectory(Path.Combine(input, "nested"));
@@ -40,6 +51,68 @@ try
     var options = new ConversionOptions { OutputDirectory = output, Lossless = true };
     var engine = new Engine();
     var src = new ImageSource(source, input);
+    var profiledSource = Path.Combine(input, "profiled.jpg");
+    using (var image = new MagickImage(MagickColors.Red, 64, 32))
+    {
+        image.SetProfile(ColorProfiles.SRGB);
+        var exif = new ExifProfile();
+        exif.SetValue(ExifTag.Artist, "Metadata test");
+        image.SetProfile(exif);
+        image.Write(profiledSource);
+    }
+    using (var inputImage = new MagickImage(profiledSource))
+        Check(inputImage.GetColorProfile() is not null && inputImage.GetExifProfile() is not null, "Profile test fixture contains ICC and EXIF");
+    var profileOptions = options with { Format = OutputKind.Jpeg, StripMetadata = true, PreserveColorProfile = true };
+    var outputProfile = engine.Convert(new(profiledSource), profileOptions, CancellationToken.None);
+    using (var resultImage = new MagickImage(outputProfile.Path))
+        Check(resultImage.GetColorProfile() is not null && resultImage.GetExifProfile() is null, "JPEG preserves ICC while removing EXIF");
+    try { (profileOptions with { Format = OutputKind.Png }).Validate(); throw new Exception("Unverified PNG ICC retention accepted"); }
+    catch (ArgumentException) { Check(true, "ICC retention is restricted to verified JPEG output"); }
+    var defaultProfile = engine.Convert(new(profiledSource), options with { Format = OutputKind.Jpeg, StripMetadata = true }, CancellationToken.None);
+    using (var outputImage = new MagickImage(defaultProfile.Path))
+        Check(outputImage.GetColorProfile() is null && outputImage.GetExifProfile() is null, "Default metadata removal also strips ICC");
+    Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.PreserveColorProfile == false &&
+        System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(options with { PreserveColorProfile = true }))?.PreserveColorProfile == true,
+        "ICC option persists and defaults off for older settings");
+    var sizes = MultiSize.Parse("100, 300");
+    Check(sizes.SequenceEqual(new uint[] { 100, 300 }) && MultiSize.Parse("").Length == 0, "Multiple output widths parse in order");
+    try { MultiSize.Parse("100,100"); throw new Exception("Duplicate sizes accepted"); }
+    catch (ArgumentException) { Check(true, "Duplicate output widths rejected"); }
+    var multiOptions = options with { OutputWidths = "100,300", Format = OutputKind.Png };
+    multiOptions.Validate();
+    foreach (var width in sizes)
+    {
+        var variant = MultiSize.ForWidth(multiOptions, width);
+        var multiResult = engine.Convert(src, variant, CancellationToken.None);
+        var multiPreview = engine.Preview(source, variant);
+        Check(multiResult.Width == width && multiResult.Height == width / 2 && Path.GetFileName(multiResult.Path).Contains($"-w{width}") &&
+            multiResult.OutputBytes == multiPreview.EncodedBytes, $"Width {width} output dimensions, name and preview size");
+    }
+    var savedMulti = System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(multiOptions));
+    Check(savedMulti?.OutputWidths == "100,300" && System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.OutputWidths == "", "Multiple widths persist and default off");
+    using (var fastOriginal = new MagickImage(engine.PreviewOriginal(source, 100)))
+        Check(fastOriginal.Width == 100 && fastOriginal.Height == 50 && fastOriginal.HasAlpha,
+            "Fast original preview fits its limit and retains transparency");
+    using (var smallOriginal = new MagickImage(engine.PreviewOriginal(source, 1000)))
+        Check(smallOriginal.Width == 400 && smallOriginal.Height == 200, "Fast original preview does not upscale");
+    Check(Engine.InputExtensions.Contains(".HEIC") && Engine.InputExtensions.Contains(".heif"), "HEIC and HEIF accepted case-insensitively");
+    var heifFixture = Environment.GetEnvironmentVariable("AKKI_HEIF_TEST_IMAGE");
+    if (!string.IsNullOrWhiteSpace(heifFixture))
+    {
+        var originalHeif = File.ReadAllBytes(heifFixture);
+        var heifOptions = options with { Format = OutputKind.Png, Lossless = false, Resize = ResizeKind.Pixels, Width = 1000, Height = 1000 };
+        Console.WriteLine("HEIF: starting conversion");
+        var converted = engine.Convert(new(heifFixture), heifOptions, CancellationToken.None);
+        Console.WriteLine("HEIF: conversion finished; starting preview");
+        var heifPreview = engine.Preview(heifFixture, heifOptions);
+        Console.WriteLine("HEIF: preview finished; comparing output");
+        using var convertedImage = new MagickImage(converted.Path);
+        using var previewImage = new MagickImage(heifPreview.Converted);
+        Check(convertedImage.Width > 0 && convertedImage.Height > 0 &&
+            convertedImage.Compare(previewImage, ErrorMetric.Absolute) == 0, "HEIF conversion and preview agree");
+        Check(originalHeif.SequenceEqual(File.ReadAllBytes(heifFixture)), "HEIF original preserved");
+    }
+    else Console.WriteLine("SKIP: HEIF conversion requires AKKI_HEIF_TEST_IMAGE pointing to a real still HEIC/HEIF file");
     Check(Engine.CalculateSize(400, 200, options with { Resize = ResizeKind.Pixels, Width = 100, Height = 100 }) == (100u, 50u), "Aspect-preserving fit");
     Check(Engine.CalculateSize(400, 200, options with { Resize = ResizeKind.Percent, Percent = 25 }) == (100u, 50u), "Percentage resize");
     Check(Engine.CalculateSize(400, 200, options with { Resize = ResizeKind.Pixels, Width = 800, Height = 800 }) == (400u, 200u), "Prevent upscaling");
@@ -66,6 +139,60 @@ try
     Check(cropped.Width == 200 && cropped.Height == 200, "Centre square crop dimensions");
     var cropPreview = engine.Preview(source, options with { Format = OutputKind.Png, Crop = CropKind.Square });
     Check(cropPreview.Width == cropped.Width && cropPreview.Height == cropped.Height, "Crop preview dimensions match conversion");
+    var customCropOptions = options with { Format = OutputKind.Png, Crop = CropKind.Custom, CropWidth = 3, CropHeight = 2 };
+    var customCrop = engine.Convert(src, customCropOptions, CancellationToken.None);
+    var customPreview = engine.Preview(source, customCropOptions);
+    using (var actualCrop = new MagickImage(customCrop.Path))
+    using (var shownCrop = new MagickImage(customPreview.Converted))
+        Check(actualCrop.Width == 300 && actualCrop.Height == 200 && actualCrop.Compare(shownCrop, ErrorMetric.Absolute) == 0,
+            "Custom crop output and preview match");
+    var tallCrop = engine.Convert(src, customCropOptions with { CropWidth = 2, CropHeight = 3 }, CancellationToken.None);
+    Check(tallCrop.Width == 133 && tallCrop.Height == 200, "Portrait custom crop dimensions");
+    var restoredCrop = System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(customCropOptions));
+    Check(restoredCrop is { Crop: CropKind.Custom, CropWidth: 3, CropHeight: 2 }, "Custom crop ratio survives serialization");
+    try { (customCropOptions with { CropWidth = 0 }).Validate(); throw new Exception("Invalid crop ratio accepted"); }
+    catch (ArgumentException) { Check(true, "Invalid custom crop ratio rejected"); }
+    var anchorSource = Path.Combine(input, "anchor.png");
+    using (var image = new MagickImage(MagickColors.Red, 400, 200))
+    using (var half = new MagickImage(MagickColors.Blue, 200, 200)) { image.Composite(half, 200, 0, CompositeOperator.Over); image.Write(anchorSource); }
+    var anchorOptions = options with { Format = OutputKind.Png, Crop = CropKind.Square };
+    var leftCrop = engine.Convert(new(anchorSource), anchorOptions with { CropAnchor = CropAnchor.Left }, CancellationToken.None);
+    var rightOptions = anchorOptions with { CropAnchor = CropAnchor.Right };
+    var rightCrop = engine.Convert(new(anchorSource), rightOptions, CancellationToken.None);
+    using (var leftImage = new MagickImage(leftCrop.Path))
+    using (var rightImage = new MagickImage(rightCrop.Path))
+    using (var leftPixels = leftImage.GetPixels())
+    using (var rightPixels = rightImage.GetPixels())
+        Check(leftPixels.GetPixel(100, 100).ToColor()!.R > 60000 && rightPixels.GetPixel(100, 100).ToColor()!.B > 60000,
+            "Crop position selects the correct side of the image");
+    var rightPreview = engine.Preview(anchorSource, rightOptions);
+    using (var actualRight = new MagickImage(rightCrop.Path))
+    using (var previewRight = new MagickImage(rightPreview.Converted))
+        Check(actualRight.Compare(previewRight, ErrorMetric.Absolute) == 0, "Crop position preview matches output");
+    Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.CropAnchor == CropAnchor.Center &&
+        System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(rightOptions))?.CropAnchor == CropAnchor.Right,
+        "Crop position persists and old settings default to centre");
+    var padOptions = options with { Format = OutputKind.Png, Resize = ResizeKind.Pixels, Width = 100, Height = 100, PadToDimensions = true };
+    var padded = engine.Convert(src, padOptions, CancellationToken.None);
+    var paddedPreview = engine.Preview(source, padOptions);
+    using (var image = new MagickImage(padded.Path))
+    using (var shown = new MagickImage(paddedPreview.Converted))
+    using (var pixels = image.GetPixels())
+        Check(image.Width == 100 && image.Height == 100 && image.HasAlpha && pixels.GetPixel(50, 0).ToColor()!.A == 0 && image.Compare(shown, ErrorMetric.Absolute) == 0,
+            "Transparent padding creates the requested canvas and matches preview");
+    var paddedJpeg = engine.Convert(src, padOptions with { Format = OutputKind.Jpeg, Background = "#FFFFFF" }, CancellationToken.None);
+    using (var image = new MagickImage(paddedJpeg.Path))
+    using (var pixels = image.GetPixels())
+    {
+        var corner = pixels.GetPixel(50, 0).ToColor()!;
+        Check(image.Width == 100 && image.Height == 100 && corner.R > 60000 && corner.G > 60000 && corner.B > 60000,
+            "JPEG padding uses the selected background");
+    }
+    var restoredPad = System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(padOptions));
+    Check(restoredPad?.PadToDimensions == true && System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.PadToDimensions == false, "Padding persists and defaults off for previous settings");
+    Check(Engine.CalculateSize(400, 200, padOptions with { Width = 800, Height = 800 }) == (400u, 200u), "Padding keeps the image at original size when upscaling is disabled");
+    try { (padOptions with { KeepAspectRatio = false }).Validate(); throw new Exception("Invalid padding accepted"); }
+    catch (ArgumentException) { Check(true, "Padding without aspect preservation rejected"); }
     var watermarkPath = Path.Combine(input, "mark.png");
     using (var watermark = new MagickImage(MagickColors.Blue, 50, 50)) watermark.Write(watermarkPath);
     var watermarkOptions = options with { Format = OutputKind.Png, WatermarkImage = watermarkPath, WatermarkSize = 20, WatermarkOpacity = 70 };

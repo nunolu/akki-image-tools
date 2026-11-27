@@ -49,14 +49,15 @@ The list below describes the development version; consult the release notes for 
 - Resize by percentage or pixel dimensions, preserve proportions and avoid upscaling.
 - Rotate images clockwise by 90, 180 or 270 degrees before resizing.
 - Flip images horizontally or vertically, including in batch conversions and previews.
-- Centre-crop to square, 16:9 or 4:5 proportions before resizing.
+- Crop to square, 16:9 or 4:5 proportions before resizing; the development version also supports custom ratios and crop positions.
 - Add filename prefixes, suffixes and sequence numbers to batch outputs.
-- Save and load named conversion presets.
+- In the development version, export multiple maximum widths per image with width suffixes.
+- Save and load named conversion presets. The development version also includes built-in WebP, email JPEG and lossless PNG presets.
 - Aim for a file size with lossy JPEG or WebP and see when the target cannot be met.
 - Add a text or image watermark with adjustable position, size and opacity.
 - Compare an original image with its actual encoded result before converting.
 - Preserve transparency where supported; choose a background for JPEG/BMP.
-- Optionally remove EXIF/location metadata and preserve imported folder structure.
+- Optionally remove EXIF/location metadata and preserve imported folder structure. The development version can retain the embedded ICC profile when removing metadata from JPEG output.
 - Keep originals; automatically rename existing output filenames.
 - See progress, output sizes and individual errors; cancel a batch.
 - Choose **Light**, **Dark** or **Use Windows settings**.
@@ -71,9 +72,9 @@ See the [privacy policy](PRIVACY.md). The Microsoft Store edition uses Store-man
 
 | Input | Output |
 | --- | --- |
-| PNG, JPG/JPEG, WebP, AVIF, TIF/TIFF, BMP, ICO, still GIF | WebP, JPEG, PNG, AVIF, TIFF, BMP, ICO |
+| PNG, JPG/JPEG, WebP, AVIF, TIF/TIFF, BMP, ICO, still GIF; HEIC/HEIF in the development version | WebP, JPEG, PNG, AVIF, TIFF, BMP, ICO |
 
-The app lists only output encoders available in the bundled library. Animated images and multipage TIFFs are explicitly rejected rather than silently losing frames/pages. ICO input uses its primary image; ICO output is a single image up to 256 × 256. HEIC, RAW, PDF and SVG are not supported by this release.
+The app lists only output encoders available in the bundled library. Animated images and multipage TIFFs are explicitly rejected rather than silently losing frames/pages. ICO input uses its primary image; ICO output is a single image up to 256 × 256. HEIC/HEIF input is being added in the development version and is not available in the latest published release. RAW, PDF and SVG are not supported.
 
 Batches process one file at a time. Cancellation takes effect between native encoder operations and before committing output. Recursive import skips unreadable folders and directory junctions. Folder paths are relative to each imported root; overlapping output filenames are renamed automatically.
 

@@ -71,6 +71,7 @@ public sealed partial class MainWindow : Window
         _ready = true;
         RefreshFormat();
         RefreshResize();
+        RefreshMetadata();
         RefreshDestinationMode();
         AppWindow.Closing += OnClosing;
         Closed += (_, _) => _updateTimer.Stop();
@@ -97,6 +98,9 @@ public sealed partial class MainWindow : Window
         FlipHorizontalBox.IsChecked = settings.FlipHorizontal;
         FlipVerticalBox.IsChecked = settings.FlipVertical;
         CropBox.SelectedIndex = Enum.IsDefined(settings.Crop) ? (int)settings.Crop : 0;
+        CropAnchorBox.SelectedIndex = Enum.IsDefined(settings.CropAnchor) ? (int)settings.CropAnchor : 0;
+        CropWidthBox.Value = settings.CropWidth;
+        CropHeightBox.Value = settings.CropHeight;
         WatermarkTextBox.Text = settings.WatermarkText;
         WatermarkImageBox.Text = settings.WatermarkImage;
         WatermarkPositionBox.SelectedIndex = Enum.IsDefined(settings.WatermarkPosition) ? (int)settings.WatermarkPosition : 0;
@@ -105,9 +109,12 @@ public sealed partial class MainWindow : Window
         PercentBox.Value = settings.Percent;
         WidthBox.Value = settings.Width;
         HeightBox.Value = settings.Height;
+        OutputWidthsBox.Text = settings.OutputWidths ?? "";
         AspectBox.IsChecked = settings.KeepAspectRatio;
+        PadCanvasBox.IsChecked = settings.PadToDimensions;
         UpscaleBox.IsChecked = settings.PreventUpscale;
         MetadataBox.IsChecked = settings.StripMetadata;
+        PreserveProfileBox.IsChecked = settings.PreserveColorProfile;
         StructureBox.IsChecked = settings.KeepFolderStructure;
         SourceFolderBox.IsChecked = settings.OutputToSourceFolder;
         FilenamePrefixBox.Text = settings.FilenamePrefix;
@@ -115,7 +122,7 @@ public sealed partial class MainWindow : Window
         NumberFilesBox.IsChecked = settings.NumberFiles;
         BackgroundBox.Text = settings.Background;
         OutputBox.Text = settings.OutputDirectory;
-        if (_ready) { RefreshFormat(); RefreshResize(); RefreshDestinationMode(); }
+        if (_ready) { RefreshFormat(); RefreshResize(); RefreshMetadata(); RefreshDestinationMode(); }
     }
 
     private async void SavePreset(object sender, RoutedEventArgs e)
@@ -139,12 +146,29 @@ public sealed partial class MainWindow : Window
     private async void LoadPreset(object sender, RoutedEventArgs e)
     {
         if (_dialogOpen) return;
-        var names = _preferences.Presets.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
-        if (names.Length == 0) { Tell("Save a preset first."); return; }
-        var selector = new ComboBox { Header = "Preset", ItemsSource = names, SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
-        var dialog = new ContentDialog { Title = "Load preset", Content = selector, PrimaryButtonText = "Load", CloseButtonText = "Cancel" };
-        dialog.PrimaryButtonClick += (_, _) => { if (selector.SelectedItem is string key) ApplyOptions(_preferences.Presets[key]); };
-        await Dialog(dialog);
+        var selector = new ComboBox { Header = "Preset", ItemsSource = PresetChoices(), SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(selector);
+        content.Children.Add(new TextBlock { Text = "Built-in presets reset editing and naming options, remove metadata, and keep your current destination. JPEG uses a white background for transparency.", TextWrapping = TextWrapping.Wrap });
+        var dialog = new ContentDialog { Title = "Load preset", Content = content, PrimaryButtonText = "Load", CloseButtonText = "Cancel" };
+        dialog.PrimaryButtonClick += (_, _) => { if (selector.SelectedItem is PresetChoice choice) ApplyPreset(choice); };
+        await Dialog(dialog, 480);
+    }
+
+    private sealed record PresetChoice(string Name, bool BuiltIn)
+    {
+        public override string ToString() => (BuiltIn ? "Built-in: " : "Saved: ") + Name;
+    }
+
+    private PresetChoice[] PresetChoices() => BuiltInPresets.Names.Select(name => new PresetChoice(name, true))
+        .Concat(_preferences.Presets.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Select(name => new PresetChoice(name, false))).ToArray();
+
+    private void ApplyPreset(PresetChoice choice)
+    {
+        var options = choice.BuiltIn
+            ? BuiltInPresets.Apply(choice.Name, OutputBox.Text, SourceFolderBox.IsChecked == true, StructureBox.IsChecked == true)
+            : _preferences.Presets[choice.Name];
+        ApplyOptions(options);
     }
 
     private void Tell(string message, InfoBarSeverity severity = InfoBarSeverity.Informational)
@@ -211,10 +235,11 @@ public sealed partial class MainWindow : Window
         Grid.SetColumn(thumbnails, 1); summaryGrid.Children.Add(summaryPanel); summaryGrid.Children.Add(thumbnails);
         details.Children.Add(new Border { Background = surface, CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Child = summaryGrid });
         var presets = new ComboBox { Header = "Preset", HorizontalAlignment = HorizontalAlignment.Stretch };
+        ToolTipService.SetToolTip(presets, "Built-in presets reset editing and naming options, remove metadata, and keep the current destination.");
         presets.Items.Add("Current settings");
-        foreach (var name in _preferences.Presets.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) presets.Items.Add(name);
+        foreach (var choice in PresetChoices()) presets.Items.Add(choice);
         presets.SelectedIndex = 0;
-        presets.SelectionChanged += (_, _) => { if (presets.SelectedIndex > 0 && presets.SelectedItem is string name && _preferences.Presets.TryGetValue(name, out var preset)) { ApplyOptions(preset); _compactRefresh?.Invoke(); } };
+        presets.SelectionChanged += (_, _) => { if (presets.SelectedItem is PresetChoice choice) { ApplyPreset(choice); _compactRefresh?.Invoke(); } };
         details.Children.Add(presets);
         var destination = new TextBlock { Text = OutputBox.Text, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
         var destinationButton = new Button { Content = destination, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left };
@@ -317,6 +342,7 @@ public sealed partial class MainWindow : Window
     {
         if (!_ready) return;
         RefreshImageNavigation();
+        RefreshResultActions();
         _previewVersion++;
         OriginalPreview.Source = null;
         ConvertedPreview.Source = null;
@@ -443,6 +469,8 @@ public sealed partial class MainWindow : Window
         if (!double.IsFinite(QualitySlider.Value) || !double.IsFinite(WidthBox.Value) ||
             !double.IsFinite(HeightBox.Value) || !double.IsFinite(PercentBox.Value) || !double.IsFinite(TargetSizeBox.Value) || TargetSizeBox.Value < 0 || TargetSizeBox.Value != Math.Truncate(TargetSizeBox.Value) || !double.IsFinite(WatermarkSizeBox.Value) || !double.IsFinite(WatermarkOpacityBox.Value))
             throw new ArgumentException("Enter valid resize dimensions and quality.");
+        if (CropBox.SelectedIndex == (int)CropKind.Custom && (!double.IsFinite(CropWidthBox.Value) || !double.IsFinite(CropHeightBox.Value) || CropWidthBox.Value < 1 || CropHeightBox.Value < 1 || CropWidthBox.Value > 1000 || CropHeightBox.Value > 1000 || CropWidthBox.Value != Math.Truncate(CropWidthBox.Value) || CropHeightBox.Value != Math.Truncate(CropHeightBox.Value)))
+            throw new ArgumentException("Enter whole numbers from 1 to 1000 for the custom crop ratio.");
         var options = new ConversionOptions
         {
             Format = (OutputKind)FormatBox.SelectedItem,
@@ -453,12 +481,18 @@ public sealed partial class MainWindow : Window
             Rotation = (RotationKind)RotationBox.SelectedIndex,
             FlipHorizontal = FlipHorizontalBox.IsChecked == true, FlipVertical = FlipVerticalBox.IsChecked == true,
             Crop = (CropKind)CropBox.SelectedIndex,
+            CropAnchor = (CropAnchor)CropAnchorBox.SelectedIndex,
+            CropWidth = CropBox.SelectedIndex == (int)CropKind.Custom ? (uint)CropWidthBox.Value : 3,
+            CropHeight = CropBox.SelectedIndex == (int)CropKind.Custom ? (uint)CropHeightBox.Value : 2,
             WatermarkText = WatermarkTextBox.Text, WatermarkImage = WatermarkImageBox.Text.Trim(), WatermarkPosition = (WatermarkPosition)WatermarkPositionBox.SelectedIndex,
             WatermarkSize = checked((uint)WatermarkSizeBox.Value), WatermarkOpacity = checked((uint)WatermarkOpacityBox.Value),
             Percent = PercentBox.Value,
             Width = checked((uint)WidthBox.Value), Height = checked((uint)HeightBox.Value),
+            OutputWidths = OutputWidthsBox.Text.Trim(),
             KeepAspectRatio = AspectBox.IsChecked == true, PreventUpscale = UpscaleBox.IsChecked == true,
+            PadToDimensions = ResizeBox.SelectedIndex == (int)ResizeKind.Pixels && PadCanvasBox.IsChecked == true,
             StripMetadata = MetadataBox.IsChecked == true, KeepFolderStructure = StructureBox.IsChecked == true, OutputToSourceFolder = SourceFolderBox.IsChecked == true,
+            PreserveColorProfile = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && PreserveProfileBox.IsChecked == true,
             FilenamePrefix = FilenamePrefixBox.Text, FilenameSuffix = FilenameSuffixBox.Text, NumberFiles = NumberFilesBox.IsChecked == true,
             Background = BackgroundBox.Text.Trim(), OutputDirectory = OutputBox.Text.Trim()
         };
@@ -481,6 +515,7 @@ public sealed partial class MainWindow : Window
     private void RefreshQueue()
     {
         RefreshImageNavigation();
+        RefreshResultActions();
         QueueCount.Text = $"{_items.Count} files";
         ConvertButton.Content = $"Convert {_items.Count} images";
         ConvertButton.IsEnabled = _items.Count > 0 && _conversion is null && !_importing;
@@ -644,8 +679,12 @@ public sealed partial class MainWindow : Window
             OutputKind.Ico => "Creates a Windows icon, fitted within 256 × 256 pixels.",
             _ => "Uncompressed bitmap. Transparent areas use the background colour below."
         };
+        RefreshMetadata();
     }
     private void ResizeChanged(object sender, SelectionChangedEventArgs e) { if (_ready) RefreshResize(); }
+    private void MetadataChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshMetadata(); }
+    private void RefreshMetadata() => PreserveProfileBox.IsEnabled = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && _conversion is null;
+    private void PaddingChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshResize(); }
     private void DestinationModeChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshDestinationMode(); }
     private void RefreshDestinationMode()
     {
@@ -655,9 +694,16 @@ public sealed partial class MainWindow : Window
     }
     private void RefreshResize()
     {
+        CropRatioPanel.Visibility = CropBox.SelectedIndex == (int)CropKind.Custom ? Visibility.Visible : Visibility.Collapsed;
+        CropAnchorBox.Visibility = CropBox.SelectedIndex > 0 ? Visibility.Visible : Visibility.Collapsed;
         PercentBox.Visibility = ResizeBox.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
         DimensionsPanel.Visibility = ResizeBox.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
         AspectBox.Visibility = ResizeBox.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+        var paddingActive = ResizeBox.SelectedIndex == 2 && PadCanvasBox.IsChecked == true;
+        PadCanvasBox.Visibility = ResizeBox.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+        PadCanvasInfo.Visibility = paddingActive ? Visibility.Visible : Visibility.Collapsed;
+        if (paddingActive) AspectBox.IsChecked = true;
+        AspectBox.IsEnabled = !paddingActive;
     }
     private async void ChooseOutput(object sender, RoutedEventArgs e)
     {
@@ -682,8 +728,12 @@ public sealed partial class MainWindow : Window
         catch (Exception error) { Tell(error.Message, InfoBarSeverity.Error); }
     }
 
-    private async void ConvertImages(object sender, RoutedEventArgs e)
+    private async void ConvertImages(object sender, RoutedEventArgs e) => await RunConversion(_items.ToArray());
+    private async void RetryFailed(object sender, RoutedEventArgs e) => await RunConversion(_items.Where(item => item.Failed).ToArray());
+
+    private async Task RunConversion(QueueItem[] batch)
     {
+        if (_conversion is not null || batch.Length == 0) return;
         ConversionOptions options;
         try { options = ReadOptions(); }
         catch (Exception error) { Tell(error.Message, InfoBarSeverity.Error); return; }
@@ -695,38 +745,92 @@ public sealed partial class MainWindow : Window
         long original = 0, converted = 0;
         try
         {
-            foreach (var item in _items.ToArray())
+            foreach (var item in batch)
             {
                 cancellation.Token.ThrowIfCancellationRequested();
-                item.Status = "Converting…";
+                item.Status = "Converting.";
+                var wasFailed = item.Failed;
+                item.OutputPath = null;
+                item.Failed = false;
                 try
                 {
-                    var sequence = done + 1;
-                    var result = await Task.Run(() => _engine.Convert(item.Source, options, cancellation.Token, sequence));
+                    var sequence = _items.IndexOf(item) + 1;
+                    var widths = MultiSize.Parse(options.OutputWidths);
+                    ConversionResult result;
+                    if (widths.Length == 0)
+                    {
+                        item.CompletedVariants.Clear();
+                        item.VariantOptions = null;
+                        result = await Task.Run(() => _engine.Convert(item.Source, options, cancellation.Token, sequence));
+                    }
+                    else
+                    {
+                        var info = new FileInfo(item.Source.Path);
+                        if (!wasFailed || item.VariantOptions != options || item.VariantSourceLength != info.Length || item.VariantSourceModified != info.LastWriteTimeUtc)
+                            item.CompletedVariants.Clear();
+                        item.VariantOptions = options;
+                        item.VariantSourceLength = info.Length;
+                        item.VariantSourceModified = info.LastWriteTimeUtc;
+                        foreach (var width in widths)
+                        {
+                            cancellation.Token.ThrowIfCancellationRequested();
+                            if (item.CompletedVariants.TryGetValue(width, out var prior) && File.Exists(prior.Path)) continue;
+                            var variantOptions = MultiSize.ForWidth(options, width);
+                            var completed = await Task.Run(() => _engine.Convert(item.Source, variantOptions, cancellation.Token, sequence));
+                            item.CompletedVariants[width] = completed;
+                        }
+                        var results = widths.Select(width => item.CompletedVariants[width]).ToArray();
+                        if (options.TargetKilobytes > 0) missedTargets += results.Count(x => x.OutputBytes > (long)options.TargetKilobytes * 1024);
+                        result = results[0] with { OutputBytes = results.Sum(x => x.OutputBytes) };
+                    }
                     item.OutputPath = result.Path;
-                    if (options.TargetKilobytes > 0 && result.OutputBytes > (long)options.TargetKilobytes * 1024)
-                        missedTargets++;
+                    if (widths.Length == 0 && options.TargetKilobytes > 0 && result.OutputBytes > (long)options.TargetKilobytes * 1024) missedTargets++;
                     original += result.OriginalBytes; converted += result.OutputBytes;
                     var difference = (1 - (double)result.OutputBytes / Math.Max(1, result.OriginalBytes)) * 100;
-                    item.Status = $"Done · {result.Width} × {result.Height} · {Size(result.OutputBytes)} · " + (difference >= 0 ? $"{difference:F0}% smaller" : $"{-difference:F0}% larger");
+                    item.Status = widths.Length > 0
+                        ? $"Done · {widths.Length} images · {Size(result.OutputBytes)} total"
+                        : $"Done · {result.Width} x {result.Height} · {Size(result.OutputBytes)} · " + (difference >= 0 ? $"{difference:F0}% smaller" : $"{-difference:F0}% larger");
                 }
-                catch (OperationCanceledException) { item.Status = "Cancelled · original kept"; throw; }
-                catch (Exception error) { errors++; item.Status = "Error · " + error.Message; }
+                catch (OperationCanceledException) { item.Failed = wasFailed || item.CompletedVariants.Count > 0; item.Status = "Cancelled · completed outputs kept"; throw; }
+                catch (Exception error) { errors++; item.Failed = true; item.Status = $"Error · {error.Message}" + (item.CompletedVariants.Count > 0 ? $" · {item.CompletedVariants.Count} outputs kept" : ""); }
                 done++;
-                Progress.Value = 100.0 * done / _items.Count;
-                StatusText.Text = $"Processed {done} of {_items.Count} images";
+                Progress.Value = 100.0 * done / batch.Length;
+                StatusText.Text = $"Processed {done} of {batch.Length} images";
             }
             StatusText.Text = $"{done - errors} converted · {errors} errors";
-            Tell($"Finished. Output: {Size(converted)}" + (original > 0 ? $" from {Size(original)}." : ".") + (missedTargets > 0 ? $" {missedTargets} images exceeded the target size." : ""), errors == 0 && missedTargets == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+            var delta = original - converted;
+            var savings = original > 0 ? $" {Size(Math.Abs(delta))} {(delta >= 0 ? "saved" : "larger")} overall." : "";
+            Tell($"Finished: {done - errors} converted, {errors} failed. Output: {Size(converted)}" + (original > 0 ? $" from {Size(original)}." : ".") + savings + (missedTargets > 0 ? $" {missedTargets} images exceeded the target size." : ""), errors == 0 && missedTargets == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
         }
         catch (OperationCanceledException) { StatusText.Text = $"Cancelled after {done} files. Completed files are kept."; }
-        finally { _conversion = null; SetWorking(false); _ = DrainLaunchImports(); }
+        finally { _conversion = null; SetWorking(false); RefreshResultActions(); _ = DrainLaunchImports(); }
+    }
+
+    private void RefreshResultActions()
+    {
+        if (!_ready) return;
+        RetryFailedButton.Visibility = _conversion is null && _items.Any(item => item.Failed) ? Visibility.Visible : Visibility.Collapsed;
+        OpenResultButton.Visibility = _conversion is null && (QueueList.SelectedItem as QueueItem)?.OutputPath is not null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void OpenResultFolder(object sender, RoutedEventArgs e)
+    {
+        var path = (QueueList.SelectedItem as QueueItem)?.OutputPath;
+        if (path is null) return;
+        try
+        {
+            var folder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(Path.GetDirectoryName(path)!);
+            if (!await Windows.System.Launcher.LaunchFolderAsync(folder)) Tell("Couldn't open the output folder.", InfoBarSeverity.Error);
+        }
+        catch (Exception error) { Tell("Couldn't open the output folder: " + error.Message, InfoBarSeverity.Error); }
     }
     private void SetWorking(bool working)
     {
+        if (working) { RetryFailedButton.Visibility = Visibility.Collapsed; OpenResultButton.Visibility = Visibility.Collapsed; }
         RefreshImageNavigation();
         SetPanelEnabled(ImportControls, !working);
         SetPanelEnabled(SettingsPanel, !working);
+        if (!working) { RefreshResize(); RefreshMetadata(); }
         RefreshDestinationMode();
         PreviewButton.IsEnabled = !working;
         ConvertButton.IsEnabled = !working && _items.Count > 0;
@@ -748,7 +852,7 @@ public sealed partial class MainWindow : Window
     }
     private static string Size(long bytes) => bytes >= 1024 * 1024 ? $"{bytes / 1048576.0:F2} MB" : $"{bytes / 1024.0:F1} KB";
 
-    private async Task Dialog(ContentDialog dialog)
+    private async Task Dialog(ContentDialog dialog, double maxWidth = 820)
     {
         if (_dialogOpen) return;
         _dialogOpen = true;
@@ -757,7 +861,7 @@ public sealed partial class MainWindow : Window
             _activeDialog = dialog;
             dialog.RequestedTheme = Root.RequestedTheme;
             dialog.XamlRoot = Root.XamlRoot;
-            dialog.Resources["ContentDialogMaxWidth"] = 820.0;
+            dialog.Resources["ContentDialogMaxWidth"] = maxWidth;
             await dialog.ShowAsync();
         }
         finally { _activeDialog = null; _dialogOpen = false; }
@@ -782,7 +886,18 @@ public sealed partial class MainWindow : Window
         try
         {
             var options = ReadOptions();
-            var preview = await Task.Run(() => _engine.Preview(item.Source.Path, options));
+            var widths = MultiSize.Parse(options.OutputWidths);
+            var previewOptions = widths.Length == 0 ? options : MultiSize.ForWidth(options, widths[0]);
+            var quickOriginal = await Task.Run(() => _engine.PreviewOriginal(item.Source.Path));
+            if (request != _previewVersion || QueueList.SelectedItem != item) return;
+            var quickBitmap = await Bitmap(quickOriginal);
+            if (request != _previewVersion || QueueList.SelectedItem != item) return;
+            OriginalPreview.Source = quickBitmap;
+            ConvertedPreview.Source = null;
+            PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            CompareDecoration.Visibility = Visibility.Collapsed;
+            PreviewInfo.Text = "Original loaded. Preparing the exact comparison and output size...";
+            var preview = await Task.Run(() => _engine.Preview(item.Source.Path, previewOptions));
             var before = await Bitmap(preview.Original);
             var after = await Bitmap(preview.Converted);
             if (request != _previewVersion || QueueList.SelectedItem != item) return;
@@ -797,11 +912,11 @@ public sealed partial class MainWindow : Window
             ResultFormat.Text = options.Format.ToString();
             ResultDimensions.Text = $"{preview.Width} × {preview.Height} px";
             ResultSize.Text = Size(preview.EncodedBytes) + (originalBytes > 0 ? difference >= 0 ? $"  ({difference:F0}% smaller)" : $"  ({-difference:F0}% larger)" : "");
-            PreviewInfo.Text = $"{options.Format} - {preview.Width} x {preview.Height} - {Size(preview.EncodedBytes)} - " +
-                Engine.OutputName(item.Source.Path, options, _items.IndexOf(item) + 1) +
+            PreviewInfo.Text = (widths.Length > 0 ? $"First of {widths.Length} sizes · " : "") + $"{options.Format} - {preview.Width} x {preview.Height} - {Size(preview.EncodedBytes)} - " +
+                Engine.OutputName(item.Source.Path, previewOptions, _items.IndexOf(item) + 1) +
                 (options.TargetKilobytes > 0 && preview.EncodedBytes > (long)options.TargetKilobytes * 1024 ? " - Target size not reached" : "") +
                 " - Existing filenames are renamed automatically." +
-                (options.Crop != CropKind.None || options.Rotation is RotationKind.Clockwise90 or RotationKind.Clockwise270 ? " Images are centred; transformed boundaries may differ." : "");
+                (options.Crop != CropKind.None || options.PadToDimensions || options.Rotation is RotationKind.Clockwise90 or RotationKind.Clockwise270 ? " Images are centred; transformed boundaries may differ." : "");
         }
         catch (Exception error) { if (request == _previewVersion) { PreviewInfo.Text = "Could not generate a preview."; Tell(error.Message, InfoBarSeverity.Error); } }
         finally { PreviewButton.IsEnabled = _conversion is null; }

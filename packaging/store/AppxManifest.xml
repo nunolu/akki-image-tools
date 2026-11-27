@@ -46,7 +46,7 @@
             <uap:DisplayName>Akki Image Tools</uap:DisplayName>
             <uap:SupportedFileTypes>
               <uap:FileType>.png</uap:FileType><uap:FileType>.jpg</uap:FileType><uap:FileType>.jpeg</uap:FileType>
-              <uap:FileType>.webp</uap:FileType><uap:FileType>.avif</uap:FileType><uap:FileType>.tif</uap:FileType><uap:FileType>.tiff</uap:FileType>
+              <uap:FileType>.webp</uap:FileType><uap:FileType>.avif</uap:FileType><uap:FileType>.heic</uap:FileType><uap:FileType>.heif</uap:FileType><uap:FileType>.tif</uap:FileType><uap:FileType>.tiff</uap:FileType>
               <uap:FileType>.bmp</uap:FileType><uap:FileType>.ico</uap:FileType><uap:FileType>.gif</uap:FileType>
             </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>

@@ -3,7 +3,8 @@ namespace Akki.ImageConverter.Core;
 public enum OutputKind { WebP, Jpeg, Png, Avif, Tiff, Bmp, Ico }
 public enum ResizeKind { Original, Percent, Pixels }
 public enum RotationKind { None, Clockwise90, Clockwise180, Clockwise270 }
-public enum CropKind { None, Square, Landscape, Portrait }
+public enum CropKind { None, Square, Landscape, Portrait, Custom }
+public enum CropAnchor { Center, Top, Bottom, Left, Right, TopLeft, TopRight, BottomLeft, BottomRight }
 public enum WatermarkPosition { BottomRight, BottomLeft, TopRight, TopLeft, Center }
 
 public sealed record ConversionOptions
@@ -17,12 +18,18 @@ public sealed record ConversionOptions
     public bool FlipHorizontal { get; init; }
     public bool FlipVertical { get; init; }
     public CropKind Crop { get; init; }
+    public CropAnchor CropAnchor { get; init; }
+    public uint CropWidth { get; init; } = 3;
+    public uint CropHeight { get; init; } = 2;
     public double Percent { get; init; } = 50;
     public uint Width { get; init; } = 1920;
     public uint Height { get; init; } = 1080;
+    public string OutputWidths { get; init; } = "";
     public bool KeepAspectRatio { get; init; } = true;
+    public bool PadToDimensions { get; init; }
     public bool PreventUpscale { get; init; } = true;
     public bool StripMetadata { get; init; } = true;
+    public bool PreserveColorProfile { get; init; }
     public string Background { get; init; } = "#FFFFFF";
     public string OutputDirectory { get; init; } = "";
     public bool OutputToSourceFolder { get; init; }
@@ -39,7 +46,16 @@ public sealed record ConversionOptions
     public void Validate()
     {
         if (!Enum.IsDefined(Rotation)) throw new ArgumentException("Choose a valid rotation.");
+        if (PreserveColorProfile && (!StripMetadata || Format != OutputKind.Jpeg))
+            throw new ArgumentException("Keeping the colour profile while removing metadata is currently available for JPEG only.");
+        if (OutputWidths is null) throw new ArgumentException("Output widths cannot be null.");
+        var outputWidths = MultiSize.Parse(OutputWidths);
+        if (outputWidths.Length > 0 && PadToDimensions) throw new ArgumentException("Multiple widths cannot be combined with padding to exact dimensions.");
+        if (outputWidths.Length > 0 && Format == OutputKind.Ico) throw new ArgumentException("Multiple widths are not available for ICO output.");
         if (!Enum.IsDefined(Crop)) throw new ArgumentException("Choose a valid crop.");
+        if (!Enum.IsDefined(CropAnchor)) throw new ArgumentException("Choose a valid crop position.");
+        if (Crop == CropKind.Custom && (CropWidth is < 1 or > 1000 || CropHeight is < 1 or > 1000))
+            throw new ArgumentException("Custom crop ratio values must be between 1 and 1000.");
         if (!Enum.IsDefined(WatermarkPosition) || WatermarkSize is < 1 or > 100 || WatermarkOpacity > 100)
             throw new ArgumentException("Choose valid watermark position, size and opacity.");
         if (WatermarkText is null || WatermarkImage is null || (WatermarkText.Length > 0 && WatermarkImage.Length > 0))
@@ -52,6 +68,8 @@ public sealed record ConversionOptions
             throw new ArgumentException("Resize percentage must be between 0.1 and 1000.");
         if (Resize == ResizeKind.Pixels && (Width == 0 || Height == 0 || Width > 32768 || Height > 32768))
             throw new ArgumentException("Width and height must be between 1 and 32768 pixels.");
+        if (PadToDimensions && (Resize != ResizeKind.Pixels || !KeepAspectRatio))
+            throw new ArgumentException("Padding requires fixed dimensions and keeping the aspect ratio.");
         if (!OutputToSourceFolder && string.IsNullOrWhiteSpace(OutputDirectory)) throw new ArgumentException("Choose an output folder.");
         if (FilenamePrefix is null || FilenameSuffix is null ||
             FilenamePrefix.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || FilenameSuffix.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
