@@ -27,7 +27,7 @@ An initial optional compact drop window can hide the full workspace, accept file
 ## Future work after the current development changes
 
 - Complete grouped manual acceptance for HEIC/HEIF input, preview, presets, batch results, crop, padding and multiple widths. Verify Store packaging and installed Explorer activation before release.
-- Extend the JPEG ICC-preservation option to other formats after verifying the encoder output. Review selective metadata controls. Location can appear in more than EXIF, including XMP and IPTC; do not claim location removal until it is tested across supported formats.
-- Investigate a bounded, memory-aware cache and preloading of nearby images; keep exact comparisons and file-size results accurate.
+- ICO ICC preservation remains disabled: an initial encode/decode did not retain the profile. Verify colour behaviour with additional real-world profiles. Review selective metadata controls using the [location investigation](metadata-location-investigation.md); do not claim location removal until it is tested across supported formats.
+- Validate the bounded in-memory original-preview cache, one-image preload and visual nine-position crop chooser during grouped UI testing; improve scheduling and resource limits if needed.
 - For the next release, update release commands and plan public asset naming as Akki Image Tools while preserving existing update compatibility.
 - Later, explore a separate editor with editable layers, vector text and a gallery of customizable text effects inspired by classic creative image editors.

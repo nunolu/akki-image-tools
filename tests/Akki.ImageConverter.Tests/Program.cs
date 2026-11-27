@@ -41,6 +41,21 @@ try
     var input = Path.Combine(root, "input");
     var output = Path.Combine(root, "output");
     Directory.CreateDirectory(Path.Combine(input, "nested"));
+    var cache = new OriginalPreviewCache(maxEntries: 2, maxBytes: 4);
+    var cacheA = Path.Combine(input, "cache-a.dat");
+    var cacheB = Path.Combine(input, "cache-b.dat");
+    var cacheC = Path.Combine(input, "cache-c.dat");
+    File.WriteAllText(cacheA, "a"); File.WriteAllText(cacheB, "b"); File.WriteAllText(cacheC, "c");
+    int generated = 0;
+    byte[] Generate(string _) { generated++; return new byte[] { 1, 2 }; }
+    cache.GetOrCreate(cacheA, Generate); cache.GetOrCreate(cacheA, Generate);
+    Check(generated == 1, "Original preview cache reuses unchanged files");
+    File.AppendAllText(cacheA, "changed"); cache.GetOrCreate(cacheA, Generate);
+    Check(generated == 2, "Original preview cache invalidates changed files");
+    cache.GetOrCreate(cacheB, Generate); cache.GetOrCreate(cacheC, Generate); cache.GetOrCreate(cacheA, Generate);
+    Check(generated == 5, "Original preview cache evicts least recently used data");
+    cache.Clear(); cache.GetOrCreate(cacheA, Generate);
+    Check(generated == 6, "Original preview cache clears stored data");
     var source = Path.Combine(input, "nested", "transparent.png");
     using (var image = new MagickImage(MagickColors.Transparent, 400, 200))
     {
@@ -57,20 +72,99 @@ try
         image.SetProfile(ColorProfiles.SRGB);
         var exif = new ExifProfile();
         exif.SetValue(ExifTag.Artist, "Metadata test");
+        exif.SetValue(ExifTag.Make, "Test camera");
+        exif.SetValue(ExifTag.Model, "Test model");
+        exif.SetValue(ExifTag.DateTimeOriginal, "2020:01:02 03:04:05");
+        exif.SetValue(ExifTag.GPSLatitudeRef, "N");
+        exif.SetValue(ExifTag.GPSLongitudeRef, "E");
+        exif.SetValue(ExifTag.GPSLatitude, new[] { new Rational(49, 1), new Rational(36, 1), new Rational(0, 1) });
+        exif.SetValue(ExifTag.GPSLongitude, new[] { new Rational(6, 1), new Rational(8, 1), new Rational(0, 1) });
         image.SetProfile(exif);
+        image.SetProfile(new XmpProfile(System.Text.Encoding.UTF8.GetBytes("<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' exif:GPSLatitude='49,36N'/></rdf:RDF></x:xmpmeta>")));
         image.Write(profiledSource);
     }
     using (var inputImage = new MagickImage(profiledSource))
-        Check(inputImage.GetColorProfile() is not null && inputImage.GetExifProfile() is not null, "Profile test fixture contains ICC and EXIF");
+        Check(inputImage.GetColorProfile() is not null && inputImage.GetExifProfile() is not null && inputImage.GetXmpProfile() is not null, "Profile test fixture contains ICC, EXIF and XMP");
+    var inspectedMetadata = ImageMetadata.Read(profiledSource);
+    Check(inspectedMetadata is { Width: 64, Height: 32, HasExif: true, HasExifGps: true, CameraMake: "Test camera" } && inspectedMetadata.ColorProfile is not null,
+        "Metadata inspection detects image details, EXIF GPS and colour profile");
+    var unprofiledMetadata = ImageMetadata.Read(source);
+    Check(unprofiledMetadata.Width == 400 && unprofiledMetadata.Height == 200 && !unprofiledMetadata.HasExifGps,
+        "Metadata inspection handles images without EXIF GPS");
+    byte[] originalProfile;
+    using (var inputImage = new MagickImage(profiledSource)) originalProfile = inputImage.GetColorProfile()!.ToByteArray();
     var profileOptions = options with { Format = OutputKind.Jpeg, StripMetadata = true, PreserveColorProfile = true };
-    var outputProfile = engine.Convert(new(profiledSource), profileOptions, CancellationToken.None);
-    using (var resultImage = new MagickImage(outputProfile.Path))
-        Check(resultImage.GetColorProfile() is not null && resultImage.GetExifProfile() is null, "JPEG preserves ICC while removing EXIF");
-    try { (profileOptions with { Format = OutputKind.Png }).Validate(); throw new Exception("Unverified PNG ICC retention accepted"); }
-    catch (ArgumentException) { Check(true, "ICC retention is restricted to verified JPEG output"); }
+    foreach (var format in new[] { OutputKind.Jpeg, OutputKind.Png, OutputKind.WebP, OutputKind.Tiff, OutputKind.Avif, OutputKind.Bmp })
+    {
+        var outputProfile = engine.Convert(new(profiledSource), profileOptions with { Format = format }, CancellationToken.None);
+        using var resultImage = new MagickImage(outputProfile.Path);
+        var resultProfile = resultImage.GetColorProfile();
+        Check(resultProfile is not null && resultProfile.ToByteArray().SequenceEqual(originalProfile) && resultImage.GetExifProfile() is null,
+            $"{format} preserves identical ICC bytes while removing EXIF");
+    }
+    var adobeSource = Path.Combine(input, "adobe-profiled.jpg");
+    using (var image = new MagickImage(MagickColors.Red, 64, 32))
+    {
+        image.SetProfile(ColorProfiles.AdobeRGB1998);
+        var exif = new ExifProfile(); exif.SetValue(ExifTag.Artist, "Private metadata"); image.SetProfile(exif);
+        image.SetProfile(new XmpProfile(System.Text.Encoding.UTF8.GetBytes("<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' exif:GPSLatitude='49,36N'/></rdf:RDF></x:xmpmeta>")));
+        image.Write(adobeSource);
+    }
+    using (var inputAdobe = new MagickImage(adobeSource))
+    {
+        Check(inputAdobe.GetColorProfile() is not null && inputAdobe.GetExifProfile() is not null && inputAdobe.GetXmpProfile() is not null,
+            "Adobe RGB test fixture contains ICC, EXIF and XMP");
+        Check(ImageMetadata.Read(adobeSource).HasXmp, "Metadata inspection detects XMP on JPEG input");
+        var expectedProfile = inputAdobe.GetColorProfile()!.ToByteArray();
+        var pngOutput = engine.Convert(new(adobeSource), profileOptions with { Format = OutputKind.Png }, CancellationToken.None);
+        using var pngImage = new MagickImage(pngOutput.Path);
+        Check(pngImage.GetColorProfile() is { } pngProfile && pngProfile.ToByteArray().SequenceEqual(expectedProfile) && pngImage.GetExifProfile() is null && pngImage.GetXmpProfile() is null,
+            "PNG preserves Adobe RGB profile while removing EXIF and XMP");
+        Check(pngImage.Compare(inputAdobe, ErrorMetric.Absolute) == 0, "PNG profile preservation keeps image pixels");
+    }
+    try { (profileOptions with { Format = OutputKind.Ico }).Validate(); throw new Exception("Unverified ICO ICC retention accepted"); }
+    catch (ArgumentException) { Check(true, "ICC retention rejects unverified ICO output"); }
     var defaultProfile = engine.Convert(new(profiledSource), options with { Format = OutputKind.Jpeg, StripMetadata = true }, CancellationToken.None);
     using (var outputImage = new MagickImage(defaultProfile.Path))
         Check(outputImage.GetColorProfile() is null && outputImage.GetExifProfile() is null, "Default metadata removal also strips ICC");
+    var basicOptions = profileOptions with { KeepBasicCameraMetadata = true };
+    var basicResult = engine.Convert(new(profiledSource), basicOptions, CancellationToken.None);
+    using (var basicImage = new MagickImage(basicResult.Path))
+    {
+        var basicExif = basicImage.GetExifProfile();
+        Check(basicExif?.GetValue(ExifTag.Make)?.Value == "Test camera" && basicExif.GetValue(ExifTag.Model)?.Value == "Test model" &&
+            basicExif.GetValue(ExifTag.DateTimeOriginal)?.Value == "2020:01:02 03:04:05" &&
+            basicExif.GetValue(ExifTag.GPSLatitudeRef) is null && basicExif.GetValue(ExifTag.Artist) is null &&
+            basicImage.GetXmpProfile() is null && basicImage.GetColorProfile() is not null,
+            "JPEG basic camera mode preserves camera/date and ICC while removing GPS and other metadata");
+    }
+    var basicWithoutProfile = engine.Convert(new(profiledSource), basicOptions with { PreserveColorProfile = false }, CancellationToken.None);
+    using (var basicImage = new MagickImage(basicWithoutProfile.Path))
+        Check(basicImage.GetColorProfile() is null && basicImage.GetExifProfile()?.GetValue(ExifTag.Make)?.Value == "Test camera" &&
+            basicImage.GetExifProfile()?.GetValue(ExifTag.GPSLatitudeRef) is null,
+            "JPEG basic camera metadata works without retaining the colour profile");
+    var basicPreview = engine.Preview(profiledSource, basicOptions);
+    Check(basicPreview.EncodedBytes == basicResult.OutputBytes, "Basic camera metadata preview reports the real output size");
+    try { (basicOptions with { Format = OutputKind.Png }).Validate(); throw new Exception("Unverified basic metadata format accepted"); }
+    catch (ArgumentException) { Check(true, "Basic camera metadata mode is restricted to JPEG output"); }
+    Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.KeepBasicCameraMetadata == false,
+        "Basic camera metadata mode defaults off for previous settings");
+    var gpsOnlyOptions = options with { Format = OutputKind.Jpeg, StripMetadata = false, RemoveExifGpsOnly = true };
+    var gpsOnlyOutput = engine.Convert(new(profiledSource), gpsOnlyOptions, CancellationToken.None);
+    using (var gpsOnlyImage = new MagickImage(gpsOnlyOutput.Path))
+    {
+        var outputExif = gpsOnlyImage.GetExifProfile();
+        Check(outputExif is not null && !outputExif.Values.Any(v => v.Tag.Ifd == ExifIfds.Gps || v.Tag.ToString().StartsWith("GPS", StringComparison.OrdinalIgnoreCase)) &&
+            outputExif.GetValue(ExifTag.Artist)?.Value == "Metadata test" && outputExif.GetValue(ExifTag.Make)?.Value == "Test camera" &&
+            gpsOnlyImage.GetXmpProfile() is not null && gpsOnlyImage.GetColorProfile() is not null,
+            "JPEG EXIF-only GPS removal retains camera, artist, XMP and ICC");
+    }
+    try { (gpsOnlyOptions with { Format = OutputKind.Png }).Validate(); throw new Exception("Unverified GPS-only output accepted"); }
+    catch (ArgumentException) { Check(true, "EXIF-only GPS removal is restricted to JPEG output"); }
+    var gpsOnlyPreview = engine.Preview(profiledSource, gpsOnlyOptions);
+    Check(gpsOnlyPreview.EncodedBytes == gpsOnlyOutput.OutputBytes, "EXIF-only GPS preview reports the encoded output size");
+    Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.RemoveExifGpsOnly == false,
+        "EXIF-only GPS removal defaults off for older settings");
     Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.PreserveColorProfile == false &&
         System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(options with { PreserveColorProfile = true }))?.PreserveColorProfile == true,
         "ICC option persists and defaults off for older settings");
@@ -172,6 +266,12 @@ try
     Check(System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>("{}")?.CropAnchor == CropAnchor.Center &&
         System.Text.Json.JsonSerializer.Deserialize<ConversionOptions>(System.Text.Json.JsonSerializer.Serialize(rightOptions))?.CropAnchor == CropAnchor.Right,
         "Crop position persists and old settings default to centre");
+    var leftBounds = Engine.CropPreviewBounds(400, 200, anchorOptions, CropAnchor.Left);
+    var rightBounds = Engine.CropPreviewBounds(400, 200, anchorOptions, CropAnchor.Right);
+    Check(leftBounds == (0.0, 0.0, 200.0, 200.0) && rightBounds == (200.0, 0.0, 200.0, 200.0),
+        "Visual crop outline reflects left and right anchors");
+    using (var transformedCropSource = new MagickImage(engine.PreviewCropSource(anchorSource, anchorOptions with { Rotation = RotationKind.Clockwise90 }, 1000)))
+        Check(transformedCropSource.Width == 200 && transformedCropSource.Height == 400, "Visual crop source reflects rotation");
     var padOptions = options with { Format = OutputKind.Png, Resize = ResizeKind.Pixels, Width = 100, Height = 100, PadToDimensions = true };
     var padded = engine.Convert(src, padOptions, CancellationToken.None);
     var paddedPreview = engine.Preview(source, padOptions);

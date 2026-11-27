@@ -7,7 +7,7 @@ Previously called Akki Image Converter. Convert and transform batches of images 
 
 ## Screenshots
 
-The following images show the **development version**. Its interface and features are not all available in the latest published release yet.
+The following images show the Akki Image Tools workspace.
 
 ![Development version showing batch conversion and image comparison](docs/screenshots/development/01-batch-workflow.png)
 
@@ -34,13 +34,13 @@ Screenshots from version 0.1.3 are shown below; the app name, icon and conversio
 
 **Microsoft Store:** An Akki Image Tools update has been submitted to the [Microsoft Store](https://apps.microsoft.com/detail/9n6nd0x0kl29). Availability of the submitted update depends on Microsoft’s review and publication. The Store manages installation and updates for its edition.
 
-Download **`lu.akki.ImageConverter-win-Setup.exe`** from the [Releases page](https://github.com/nunolu/akki-image-tools/releases). The installer includes the required runtimes, adds Desktop and Start-menu shortcuts, and provides an uninstaller. No separate codec installation is needed.
+Download **`Akki-Image-Tools-win-Setup.exe`** from the [Releases page](https://github.com/nunolu/akki-image-tools/releases). Older releases use `lu.akki.ImageConverter-win-Setup.exe`. The installer includes the required runtimes, adds Desktop and Start-menu shortcuts, and provides an uninstaller. No separate codec installation is needed.
 
-A portable ZIP is available on the same release page. Extract it completely and run `Akki.ImageConverter.exe`; installed-app updates are not available in portable mode. The installer is currently unsigned.
+The portable `Akki-Image-Tools-win-Portable.zip` is available on the same release page. Extract it completely and run `Akki.ImageConverter.exe`; installed-app updates are not available in portable mode. The installer is currently unsigned.
 
 ## Features
 
-The list below describes the development version; consult the release notes for features available in a published download.
+The list below describes version 1.4.0; Microsoft Store availability depends on review and publication.
 
 - Import multiple files or entire folders, optionally including subfolders.
 - Drag images or folders onto the window; pin it above other windows.
@@ -49,15 +49,15 @@ The list below describes the development version; consult the release notes for 
 - Resize by percentage or pixel dimensions, preserve proportions and avoid upscaling.
 - Rotate images clockwise by 90, 180 or 270 degrees before resizing.
 - Flip images horizontally or vertically, including in batch conversions and previews.
-- Crop to square, 16:9 or 4:5 proportions before resizing; the development version also supports custom ratios and crop positions.
+- Crop to square, 16:9, 4:5 or custom proportions before resizing, with a visual chooser for nine crop positions. Add padding to fit a canvas.
 - Add filename prefixes, suffixes and sequence numbers to batch outputs.
-- In the development version, export multiple maximum widths per image with width suffixes.
-- Save and load named conversion presets. The development version also includes built-in WebP, email JPEG and lossless PNG presets.
+- Export multiple maximum widths per image with width suffixes.
+- Save and load named conversion presets, including built-in WebP, email JPEG and lossless PNG presets.
 - Aim for a file size with lossy JPEG or WebP and see when the target cannot be met.
 - Add a text or image watermark with adjustable position, size and opacity.
-- Compare an original image with its actual encoded result before converting.
+- Compare an original image with its actual encoded result before converting. A small in-memory cache of original previews preloads the next image after the comparison completes.
 - Preserve transparency where supported; choose a background for JPEG/BMP.
-- Optionally remove EXIF/location metadata and preserve imported folder structure. The development version can retain the embedded ICC profile when removing metadata from JPEG output.
+- Inspect a selected image's basic metadata. JPEG options can retain only camera make, model and capture date while removing other metadata, or remove EXIF GPS tags only while retaining other metadata. The latter does not remove location from XMP, IPTC, maker notes or other sources. Optionally remove metadata and preserve imported folder structure. Retain the embedded ICC profile when removing metadata from JPEG, PNG, WebP, TIFF, AVIF and BMP output.
 - Keep originals; automatically rename existing output filenames.
 - See progress, output sizes and individual errors; cancel a batch.
 - Choose **Light**, **Dark** or **Use Windows settings**.
@@ -72,9 +72,9 @@ See the [privacy policy](PRIVACY.md). The Microsoft Store edition uses Store-man
 
 | Input | Output |
 | --- | --- |
-| PNG, JPG/JPEG, WebP, AVIF, TIF/TIFF, BMP, ICO, still GIF; HEIC/HEIF in the development version | WebP, JPEG, PNG, AVIF, TIFF, BMP, ICO |
+| PNG, JPG/JPEG, WebP, AVIF, TIF/TIFF, BMP, ICO, still GIF, HEIC/HEIF | WebP, JPEG, PNG, AVIF, TIFF, BMP, ICO |
 
-The app lists only output encoders available in the bundled library. Animated images and multipage TIFFs are explicitly rejected rather than silently losing frames/pages. ICO input uses its primary image; ICO output is a single image up to 256 × 256. HEIC/HEIF input is being added in the development version and is not available in the latest published release. RAW, PDF and SVG are not supported.
+The app lists only output encoders available in the bundled library. Animated images and multipage TIFFs are explicitly rejected rather than silently losing frames/pages. ICO input uses its primary image; ICO output is a single image up to 256 × 256. RAW, PDF and SVG are not supported.
 
 Batches process one file at a time. Cancellation takes effect between native encoder operations and before committing output. Recursive import skips unreadable folders and directory junctions. Folder paths are relative to each imported root; overlapping output filenames are renamed automatically.
 
@@ -102,11 +102,12 @@ The build script restores dependencies, builds and runs real-image integration c
 ## Create a release
 
 ```powershell
-.\scripts\Package.ps1 -Version 1.2.0 -ReleaseNotes .\docs\release-notes-1.2.0.md
+$version = '<next-version>' # Replace with an unused major.minor.patch version.
+.\scripts\Package.ps1 -Version $version -ReleaseNotes ".\docs\release-notes-$version.md"
 .\scripts\CreateSourceBundle.ps1
 ```
 
-Installer/update files are generated in `artifacts/releases`. The matching native source bundle is generated in `artifacts`. These scripts do not upload or install anything. Use a higher version for subsequent releases; keep corresponding native sources available with each binary release. See [release and update hosting](docs/releasing.md).
+Create the matching release-notes file first. Installer/update files are generated in `artifacts/releases`. The matching native source bundle is generated in `artifacts`. These scripts do not upload or install anything. Use a higher version for subsequent releases; keep corresponding native sources available with each binary release. See [release and update hosting](docs/releasing.md).
 
 Update support is implemented, but automatic updates require the feed at `https://update.akki.lu/akki-image-converter/win-x64/stable/` to be deployed. Checks run on launch and every six hours while the installed app is open, subject to user preference. No always-running service is installed.
 

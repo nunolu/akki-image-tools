@@ -32,6 +32,24 @@ public sealed class ImageConverter
         return ((uint)Math.Max(1, Math.Round(width * sx)), (uint)Math.Max(1, Math.Round(height * sy)));
     }
 
+    public static (double X, double Y, double Width, double Height) CropPreviewBounds(
+        double width, double height, ConversionOptions options, CropAnchor anchor)
+    {
+        if (width <= 0 || height <= 0 || options.Crop == CropKind.None) throw new ArgumentException("Choose an image and crop ratio.");
+        var ratio = options.Crop switch
+        {
+            CropKind.Square => 1.0, CropKind.Landscape => 16.0 / 9, CropKind.Portrait => 4.0 / 5,
+            CropKind.Custom when options.CropWidth > 0 && options.CropHeight > 0 => (double)options.CropWidth / options.CropHeight,
+            _ => throw new ArgumentException("Choose a valid crop ratio.")
+        };
+        double cropWidth = width, cropHeight = height;
+        if (width / height > ratio) cropWidth = height * ratio;
+        else cropHeight = width / ratio;
+        double horizontal = anchor switch { CropAnchor.Left or CropAnchor.TopLeft or CropAnchor.BottomLeft => 0, CropAnchor.Right or CropAnchor.TopRight or CropAnchor.BottomRight => 1, _ => 0.5 };
+        double vertical = anchor switch { CropAnchor.Top or CropAnchor.TopLeft or CropAnchor.TopRight => 0, CropAnchor.Bottom or CropAnchor.BottomLeft or CropAnchor.BottomRight => 1, _ => 0.5 };
+        return ((width - cropWidth) * horizontal, (height - cropHeight) * vertical, cropWidth, cropHeight);
+    }
+
     private static MagickImage LoadStill(string path)
     {
         // Ping the collection first: never silently discard animation frames or TIFF pages.
@@ -108,9 +126,24 @@ public sealed class ImageConverter
         if (options.StripMetadata)
         {
             var profile = image.GetColorProfile();
+            ExifProfile? cameraDetails = null;
+            if (options.KeepBasicCameraMetadata && image.GetExifProfile() is { } originalExif)
+            {
+                cameraDetails = new ExifProfile();
+                if (originalExif.GetValue(ExifTag.Make)?.Value is { } make) cameraDetails.SetValue(ExifTag.Make, make);
+                if (originalExif.GetValue(ExifTag.Model)?.Value is { } model) cameraDetails.SetValue(ExifTag.Model, model);
+                if (originalExif.GetValue(ExifTag.DateTimeOriginal)?.Value is { } date) cameraDetails.SetValue(ExifTag.DateTimeOriginal, date);
+            }
             if (options.PreserveColorProfile && profile is not null)
             {
                 image.Strip();
+                if (options.Format == OutputKind.Png)
+                {
+                    // Strip suppresses PNG ancillary chunks. Reload losslessly to clear that
+                    // encoder state before restoring the profile to the stripped image.
+                    image.Read(image.ToByteArray(MagickFormat.Miff));
+                    image.Settings.SetDefine(MagickFormat.Png, "preserve-iCCP", "true");
+                }
                 image.SetProfile(profile);
             }
             else
@@ -120,6 +153,15 @@ public sealed class ImageConverter
                 else image.ColorSpace = ColorSpace.sRGB;
                 image.Strip();
             }
+            if (cameraDetails is not null && cameraDetails.Values.Count > 0) image.SetProfile(cameraDetails);
+        }
+        else if (options.RemoveExifGpsOnly && image.GetExifProfile() is { } exif)
+        {
+            // Deliberately scoped to EXIF GPS. XMP, IPTC and maker notes are not sanitized.
+            foreach (var tag in exif.Values.Select(value => value.Tag).Where(tag => tag.Ifd == ExifIfds.Gps || tag.ToString().StartsWith("GPS", StringComparison.OrdinalIgnoreCase)).ToArray())
+                exif.RemoveValue(tag);
+            exif.RemoveValue(ExifTag.GPSIFDOffset);
+            image.SetProfile(exif);
         }
         image.Quality = options.Quality;
         if (options.Format == OutputKind.WebP)
@@ -228,6 +270,19 @@ public sealed class ImageConverter
     {
         if (maxDimension == 0) throw new ArgumentOutOfRangeException(nameof(maxDimension));
         using var image = LoadStill(path);
+        if (image.Width > maxDimension || image.Height > maxDimension)
+            image.Resize(new MagickGeometry(maxDimension, maxDimension));
+        image.Settings.SetDefine(MagickFormat.Png, "compression-level", "1");
+        return image.ToByteArray(MagickFormat.Png);
+    }
+
+    public byte[] PreviewCropSource(string path, ConversionOptions options, uint maxDimension = 1200)
+    {
+        if (maxDimension == 0) throw new ArgumentOutOfRangeException(nameof(maxDimension));
+        using var image = LoadStill(path);
+        if (options.Rotation != RotationKind.None) image.Rotate((int)options.Rotation * 90);
+        if (options.FlipHorizontal) image.Flop();
+        if (options.FlipVertical) image.Flip();
         if (image.Width > maxDimension || image.Height > maxDimension)
             image.Resize(new MagickGeometry(maxDimension, maxDimension));
         image.Settings.SetDefine(MagickFormat.Png, "compression-level", "1");

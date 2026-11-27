@@ -9,6 +9,8 @@ public enum WatermarkPosition { BottomRight, BottomLeft, TopRight, TopLeft, Cent
 
 public sealed record ConversionOptions
 {
+    public static bool SupportsColorProfilePreservation(OutputKind format) =>
+        format is OutputKind.Jpeg or OutputKind.Png or OutputKind.WebP or OutputKind.Tiff or OutputKind.Avif or OutputKind.Bmp;
     public OutputKind Format { get; init; } = OutputKind.WebP;
     public uint Quality { get; init; } = 80;
     public bool Lossless { get; init; }
@@ -29,6 +31,8 @@ public sealed record ConversionOptions
     public bool PadToDimensions { get; init; }
     public bool PreventUpscale { get; init; } = true;
     public bool StripMetadata { get; init; } = true;
+    public bool RemoveExifGpsOnly { get; init; }
+    public bool KeepBasicCameraMetadata { get; init; }
     public bool PreserveColorProfile { get; init; }
     public string Background { get; init; } = "#FFFFFF";
     public string OutputDirectory { get; init; } = "";
@@ -46,8 +50,12 @@ public sealed record ConversionOptions
     public void Validate()
     {
         if (!Enum.IsDefined(Rotation)) throw new ArgumentException("Choose a valid rotation.");
-        if (PreserveColorProfile && (!StripMetadata || Format != OutputKind.Jpeg))
-            throw new ArgumentException("Keeping the colour profile while removing metadata is currently available for JPEG only.");
+        if (RemoveExifGpsOnly && (StripMetadata || Format != OutputKind.Jpeg))
+            throw new ArgumentException("Removing EXIF GPS tags only is currently available for JPEG output when other metadata is kept.");
+        if (PreserveColorProfile && (!StripMetadata || !SupportsColorProfilePreservation(Format)))
+            throw new ArgumentException("Keeping the colour profile while removing metadata is unavailable for this output format.");
+        if (KeepBasicCameraMetadata && (!StripMetadata || Format != OutputKind.Jpeg))
+            throw new ArgumentException("Keeping basic camera details while removing other metadata is currently available for JPEG only.");
         if (OutputWidths is null) throw new ArgumentException("Output widths cannot be null.");
         var outputWidths = MultiSize.Parse(OutputWidths);
         if (outputWidths.Length > 0 && PadToDimensions) throw new ArgumentException("Multiple widths cannot be combined with padding to exact dimensions.");

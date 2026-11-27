@@ -6,7 +6,8 @@ Use a version higher than existing packages:
 
 ```powershell
 .\scripts\Build.ps1 -Configuration Release
-.\scripts\Package.ps1 -Version 0.1.7 -ReleaseNotes .\docs\release-notes-0.1.7.md
+$version = '<next-version>' # Replace with an unused major.minor.patch version.
+.\scripts\Package.ps1 -Version $version -ReleaseNotes ".\docs\release-notes-$version.md"
 .\scripts\CreateSourceBundle.ps1
 ```
 
@@ -18,6 +19,23 @@ third-party notices, the application's MIT licence and dependency audit are bund
 The current publisher build is unsigned. Configure code signing before presenting
 future releases as signed, and test the installer plus an installed version-to-version
 upgrade. A successful build alone does not validate installation or live updates.
+
+Create the matching release-notes file before running the packaging command.
+
+## Public filenames and upgrade compatibility
+
+The next release should use user-facing installer and portable download names
+that say **Akki Image Tools**. The packaging script produces the existing
+`lu.akki.ImageConverter` names; prepare byte-identical public copies named
+`Akki-Image-Tools-win-Setup.exe` and `Akki-Image-Tools-win-Portable.zip`.
+Keep the existing Velopack package ID, package and manifest filenames, installed
+application identity, and self-hosted feed URL unless an explicitly planned migration
+has been verified. A public download alias can be a byte-identical copy of the
+generated installer or portable ZIP; do not rename packages referenced by a feed.
+Generate checksums for the exact public files and test a clean install, portable
+launch, and an upgrade from the previous installed version against a staging feed.
+Verify the Store package identity and installed Store upgrade separately. Do not
+remove prior release assets or change the current production feed as part of this work.
 
 ## GitHub release assets
 

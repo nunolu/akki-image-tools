@@ -22,6 +22,8 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<QueueItem> _items = [];
     private readonly Preferences _preferences = Preferences.Load();
     private readonly Engine _engine = new();
+    private readonly OriginalPreviewCache _originalPreviewCache = new();
+    private Task? _preloadTask;
     private readonly UpdateService _updates = new();
     private readonly DispatcherTimer _updateTimer = new() { Interval = TimeSpan.FromHours(6) };
     private CancellationTokenSource? _conversion;
@@ -74,7 +76,7 @@ public sealed partial class MainWindow : Window
         RefreshMetadata();
         RefreshDestinationMode();
         AppWindow.Closing += OnClosing;
-        Closed += (_, _) => _updateTimer.Stop();
+        Closed += (_, _) => { _updateTimer.Stop(); _previewVersion++; _originalPreviewCache.Clear(); };
         _updateTimer.Tick += async (_, _) => await CheckAutomatically();
         Root.Loaded += async (_, _) =>
         {
@@ -114,6 +116,8 @@ public sealed partial class MainWindow : Window
         PadCanvasBox.IsChecked = settings.PadToDimensions;
         UpscaleBox.IsChecked = settings.PreventUpscale;
         MetadataBox.IsChecked = settings.StripMetadata;
+        RemoveExifGpsBox.IsChecked = settings.RemoveExifGpsOnly;
+        KeepCameraMetadataBox.IsChecked = settings.KeepBasicCameraMetadata;
         PreserveProfileBox.IsChecked = settings.PreserveColorProfile;
         StructureBox.IsChecked = settings.KeepFolderStructure;
         SourceFolderBox.IsChecked = settings.OutputToSourceFolder;
@@ -492,7 +496,9 @@ public sealed partial class MainWindow : Window
             KeepAspectRatio = AspectBox.IsChecked == true, PreventUpscale = UpscaleBox.IsChecked == true,
             PadToDimensions = ResizeBox.SelectedIndex == (int)ResizeKind.Pixels && PadCanvasBox.IsChecked == true,
             StripMetadata = MetadataBox.IsChecked == true, KeepFolderStructure = StructureBox.IsChecked == true, OutputToSourceFolder = SourceFolderBox.IsChecked == true,
-            PreserveColorProfile = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && PreserveProfileBox.IsChecked == true,
+            RemoveExifGpsOnly = MetadataBox.IsChecked != true && FormatBox.SelectedItem is OutputKind.Jpeg && RemoveExifGpsBox.IsChecked == true,
+            KeepBasicCameraMetadata = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && KeepCameraMetadataBox.IsChecked == true,
+            PreserveColorProfile = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind profileFormat && ConversionOptions.SupportsColorProfilePreservation(profileFormat) && PreserveProfileBox.IsChecked == true,
             FilenamePrefix = FilenamePrefixBox.Text, FilenameSuffix = FilenameSuffixBox.Text, NumberFiles = NumberFilesBox.IsChecked == true,
             Background = BackgroundBox.Text.Trim(), OutputDirectory = OutputBox.Text.Trim()
         };
@@ -683,8 +689,71 @@ public sealed partial class MainWindow : Window
     }
     private void ResizeChanged(object sender, SelectionChangedEventArgs e) { if (_ready) RefreshResize(); }
     private void MetadataChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshMetadata(); }
-    private void RefreshMetadata() => PreserveProfileBox.IsEnabled = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && _conversion is null;
+    private void RefreshMetadata()
+    {
+        PreserveProfileBox.IsEnabled = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind format && ConversionOptions.SupportsColorProfilePreservation(format) && _conversion is null;
+        KeepCameraMetadataBox.IsEnabled = MetadataBox.IsChecked == true && FormatBox.SelectedItem is OutputKind.Jpeg && _conversion is null;
+        RemoveExifGpsBox.IsEnabled = MetadataBox.IsChecked != true && FormatBox.SelectedItem is OutputKind.Jpeg && _conversion is null;
+        ExifGpsWarning.Visibility = MetadataBox.IsChecked != true && FormatBox.SelectedItem is OutputKind.Jpeg && RemoveExifGpsBox.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+    }
     private void PaddingChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshResize(); }
+
+    private async void ChooseCropPosition(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen || _conversion is not null) return;
+        if (QueueList.SelectedItem is not QueueItem item) { Tell("Select an image to position the crop."); return; }
+        try
+        {
+            var options = ReadOptions();
+            if (options.Crop == CropKind.None) { Tell("Choose a crop ratio first."); return; }
+            ChooseCropButton.IsEnabled = false;
+            var data = await Task.Run(() => _engine.PreviewCropSource(item.Source.Path, options));
+            if (QueueList.SelectedItem != item) return;
+            var bitmap = await Bitmap(data);
+            if (QueueList.SelectedItem != item || bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0) return;
+            var maxWidth = Math.Min(580.0, Math.Max(180.0, Root.XamlRoot.Size.Width - 120));
+            var scale = Math.Min(maxWidth / bitmap.PixelWidth, 350.0 / bitmap.PixelHeight);
+            var width = bitmap.PixelWidth * scale;
+            var height = bitmap.PixelHeight * scale;
+            var picture = new Grid { Width = width, Height = height, HorizontalAlignment = HorizontalAlignment.Center };
+            picture.Children.Add(new Image { Source = bitmap, Stretch = Stretch.Fill });
+            var overlay = new Canvas { Width = width, Height = height, IsHitTestVisible = false };
+            var outline = new Microsoft.UI.Xaml.Shapes.Rectangle { Stroke = new SolidColorBrush(Microsoft.UI.Colors.White), StrokeThickness = 3 };
+            overlay.Children.Add(outline); picture.Children.Add(overlay);
+            var choices = new Grid { Width = width, Height = height };
+            for (int i = 0; i < 3; i++) { choices.RowDefinitions.Add(new RowDefinition()); choices.ColumnDefinitions.Add(new ColumnDefinition()); }
+            var anchors = new[] { CropAnchor.TopLeft, CropAnchor.Top, CropAnchor.TopRight, CropAnchor.Left, CropAnchor.Center, CropAnchor.Right, CropAnchor.BottomLeft, CropAnchor.Bottom, CropAnchor.BottomRight };
+            var symbols = new[] { "↖", "↑", "↗", "←", "●", "→", "↙", "↓", "↘" };
+            var selected = options.CropAnchor;
+            var selectedText = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            void UpdateSelection()
+            {
+                var bounds = Engine.CropPreviewBounds(width, height, options, selected);
+                Canvas.SetLeft(outline, bounds.X); Canvas.SetTop(outline, bounds.Y);
+                outline.Width = bounds.Width; outline.Height = bounds.Height;
+                selectedText.Text = $"Selected: {selected}. The white outline shows the area to keep.";
+            }
+            for (int i = 0; i < anchors.Length; i++)
+            {
+                var choice = anchors[i];
+                var button = new Button { Content = symbols[i], MinWidth = 36, MinHeight = 36, Padding = new Thickness(5), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, $"Keep {choice}");
+                ToolTipService.SetToolTip(button, $"Keep {choice}");
+                button.Click += (_, _) => { selected = choice; UpdateSelection(); };
+                Grid.SetRow(button, i / 3); Grid.SetColumn(button, i % 3); choices.Children.Add(button);
+            }
+            picture.Children.Add(choices);
+            UpdateSelection();
+            var content = new StackPanel { Spacing = 10 };
+            content.Children.Add(new TextBlock { Text = "Select an arrow or the centre point. Rotation and flips are shown; this position applies to the whole batch.", TextWrapping = TextWrapping.Wrap });
+            content.Children.Add(picture); content.Children.Add(selectedText);
+            var dialog = new ContentDialog { Title = "Choose crop position", Content = new ScrollViewer { Content = content, MaxHeight = 500, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, PrimaryButtonText = "Apply", CloseButtonText = "Cancel" };
+            dialog.PrimaryButtonClick += (_, _) => CropAnchorBox.SelectedIndex = (int)selected;
+            await Dialog(dialog, 700);
+        }
+        catch (Exception error) { Tell("Couldn't position crop: " + error.Message, InfoBarSeverity.Error); }
+        finally { ChooseCropButton.IsEnabled = _conversion is null; }
+    }
     private void DestinationModeChanged(object sender, RoutedEventArgs e) { if (_ready) RefreshDestinationMode(); }
     private void RefreshDestinationMode()
     {
@@ -696,6 +765,7 @@ public sealed partial class MainWindow : Window
     {
         CropRatioPanel.Visibility = CropBox.SelectedIndex == (int)CropKind.Custom ? Visibility.Visible : Visibility.Collapsed;
         CropAnchorBox.Visibility = CropBox.SelectedIndex > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ChooseCropButton.Visibility = CropBox.SelectedIndex > 0 ? Visibility.Visible : Visibility.Collapsed;
         PercentBox.Visibility = ResizeBox.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
         DimensionsPanel.Visibility = ResizeBox.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
         AspectBox.Visibility = ResizeBox.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
@@ -726,6 +796,32 @@ public sealed partial class MainWindow : Window
             if (file is not null) WatermarkImageBox.Text = file.Path;
         }
         catch (Exception error) { Tell(error.Message, InfoBarSeverity.Error); }
+    }
+
+    private async void InspectImage(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen || _conversion is not null) return;
+        if (QueueList.SelectedItem is not QueueItem item) { Tell("Select an image to inspect."); return; }
+        try
+        {
+            var metadata = await Task.Run(() => ImageMetadata.Read(item.Source.Path));
+            var camera = string.Join(" ", new[] { metadata.CameraMake, metadata.CameraModel }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            var details = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Text = $"{item.Name}\n\nFormat: {metadata.Format}\nStored dimensions: {metadata.Width} × {metadata.Height} pixels\n" +
+                    $"File size: {Size(metadata.FileBytes)}\nColour profile: {metadata.ColorProfile ?? "None detected"}\n\n" +
+                    $"Camera: {(camera.Length == 0 ? "Not found" : camera)}\n" +
+                    $"Date taken: {metadata.DateTaken ?? "Not found"}\n" +
+                    $"EXIF: {(metadata.HasExif ? "Present" : "Not found")}\n" +
+                    $"GPS EXIF tags: {(metadata.HasExifGps ? "Detected" : "Not detected")}\n" +
+                    $"XMP: {(metadata.HasXmp ? "Present" : "Not found")}\nIPTC: {(metadata.HasIptc ? "Present" : "Not found")}\n\n" +
+                    "This is a summary, not a complete privacy scan. Location or other information may appear in other metadata."
+            };
+            var content = new ScrollViewer { Content = details, MaxHeight = 500, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            await Dialog(new ContentDialog { Title = "Image details", Content = content, CloseButtonText = "Close" }, 520);
+        }
+        catch (Exception error) { Tell("Couldn't inspect image: " + error.Message, InfoBarSeverity.Error); }
     }
 
     private async void ConvertImages(object sender, RoutedEventArgs e) => await RunConversion(_items.ToArray());
@@ -888,7 +984,7 @@ public sealed partial class MainWindow : Window
             var options = ReadOptions();
             var widths = MultiSize.Parse(options.OutputWidths);
             var previewOptions = widths.Length == 0 ? options : MultiSize.ForWidth(options, widths[0]);
-            var quickOriginal = await Task.Run(() => _engine.PreviewOriginal(item.Source.Path));
+            var quickOriginal = await Task.Run(() => _originalPreviewCache.GetOrCreate(item.Source.Path, path => _engine.PreviewOriginal(path)));
             if (request != _previewVersion || QueueList.SelectedItem != item) return;
             var quickBitmap = await Bitmap(quickOriginal);
             if (request != _previewVersion || QueueList.SelectedItem != item) return;
@@ -917,9 +1013,26 @@ public sealed partial class MainWindow : Window
                 (options.TargetKilobytes > 0 && preview.EncodedBytes > (long)options.TargetKilobytes * 1024 ? " - Target size not reached" : "") +
                 " - Existing filenames are renamed automatically." +
                 (options.Crop != CropKind.None || options.PadToDimensions || options.Rotation is RotationKind.Clockwise90 or RotationKind.Clockwise270 ? " Images are centred; transformed boundaries may differ." : "");
+            PreloadNextOriginal(item, request);
         }
         catch (Exception error) { if (request == _previewVersion) { PreviewInfo.Text = "Could not generate a preview."; Tell(error.Message, InfoBarSeverity.Error); } }
         finally { PreviewButton.IsEnabled = _conversion is null; }
+    }
+
+    private void PreloadNextOriginal(QueueItem current, int request)
+    {
+        var index = _items.IndexOf(current);
+        if (_conversion is not null || index < 0 || index + 1 >= _items.Count || _preloadTask is { IsCompleted: false }) return;
+        var path = _items[index + 1].Source.Path;
+        _preloadTask = Task.Run(() =>
+        {
+            try
+            {
+                if (request != System.Threading.Volatile.Read(ref _previewVersion)) return;
+                _originalPreviewCache.GetOrCreate(path, source => _engine.PreviewOriginal(source));
+            }
+            catch (Exception) { /* Preloading is optional; selecting the file reports any error. */ }
+        });
     }
 
     private async void ShowAbout(object sender, RoutedEventArgs e)
